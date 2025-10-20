@@ -1,8 +1,11 @@
-# Initial RouterOS configuration
+# init-config.rsc (final)
+# - set ether1 IP 10.0.0.2/28
+# - enable services & basic NAT/firewall
 /ip address add address=10.0.0.2/28 interface=ether1
+/ip route add gateway=10.0.0.1
+/ip dns set servers=8.8.8.8
 /ip service enable winbox
-/ip service set www disabled=yes
-/ip firewall filter add chain=input connection-state=established,related action=accept comment="allow established"
-/ip firewall filter add chain=input src-address=10.0.0.0/28 action=accept comment="allow LAN"
-/ip firewall filter add chain=input protocol=tcp dst-port=8291,22,80,443 action=accept comment="allow mgmt"
-/ip firewall filter add chain=input action=drop comment="drop all other"
+/ip service enable api
+/ip service enable ssh
+/ip firewall nat add chain=srcnat out-interface=ether1 action=masquerade
+/system note set show-at-login=no
