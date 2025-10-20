@@ -127,6 +127,10 @@ brctl addif bridge-nat tap0
 CONFIG_FLAG="/root/chr/.configured"
 INIT_RSC="/root/chr/init.rsc"
 if [[ ! -f "${CONFIG_FLAG}" ]]; then
+LOG_FILE="/root/chr/inject.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "🔍 Injector started at $(date)"
+
   echo "🔧 Preparing first-boot configuration..."
   cat > "${INIT_RSC}" <<'RSCEOF'
 /ip address add address=10.92.68.2/28 interface=ether1
@@ -152,7 +156,35 @@ RSCEOF
   QEMU_BG_PID=$!
   echo "⌛ Waiting for CHR to boot (approx 20s)..."
   # wait some seconds for RouterOS to boot
-  sleep 20
+    QEMU_BG_PID=$!
+  echo "⌛ Waiting for CHR to fully boot (detecting serial port 5000)..."
+
+  # Wait up to 90 seconds for port 5000 to appear (adaptive wait)
+  for i in {1..90}; do
+    if ss -ltnp 2>/dev/null | grep -q ":5000"; then
+      echo "✅ Serial port ready after $i seconds."
+      break
+    fi
+    sleep 1
+  done
+
+  # Extra wait to ensure RouterOS prompt is available
+  echo "⌛ Giving RouterOS time to show login prompt..."
+  sleep 10
+
+  # attempt to send init.rsc via socat (with retries)
+  for i in 1 2 3; do
+    echo "📡 Sending configuration attempt #$i..."
+    awk '{print $0"\\r"}' "${INIT_RSC}" | socat - TCP:127.0.0.1:5000,connect-timeout=5 || true
+    sleep 3
+  done
+
+  echo "⌛ Wait for CHR to process and reboot (approx 10s)..."
+  sleep 10
+  pkill -f "qemu-system-x86_64.*5000" 2>/dev/null || true
+  touch "${CONFIG_FLAG}"
+  echo "✅ Initial CHR configuration injected."
+
 
   # attempt to send init.rsc via socat (with retries)
   for i in 1 2 3; do
