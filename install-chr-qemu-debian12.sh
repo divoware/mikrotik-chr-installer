@@ -19,7 +19,8 @@ SERVICE_FILE="/etc/systemd/system/chr.service"
 INJECT_SCRIPT="$CHR_DIR/force-inject.sh"
 INIT_RSC="$CHR_DIR/init-config.rsc"
 
-log(){ echo -e \"[CHR-INSTALL] $*\"; }
+log() { echo -e "[CHR-INSTALL] $*"; }
+
 
 log \"Install deps (qemu, bridge-utils, socat, unzip)\"
 apt update -y
