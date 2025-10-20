@@ -1,25 +1,43 @@
 #!/bin/bash
-# force-inject.sh — safely inject init config into CHR
+# Final force-inject.sh (smart injector)
 set -euo pipefail
-SOCK=127.0.0.1:5000
+SOCK_HOST=127.0.0.1
+SOCK_PORT=5000
 RSC="/root/chr/init-config.rsc"
-RETRIES=15
+LOG="/root/chr/inject.log"
+RETRIES=40
 SLEEP=3
-log(){ echo -e "\033[1;33m[INJECT]\033[0m $*"; }
+
+log(){ echo -e "[INJECT] $*"; }
+
+log "Starting injector (will wait until CHR console ready). Logging to $LOG"
+echo "[INJECT] START $(date)" >> "$LOG"
 
 for i in $(seq 1 $RETRIES); do
-  if timeout 2 bash -c "</dev/tcp/127.0.0.1/5000" 2>/dev/null; then
-    log "Socket ready (try $i)"
+  # try to read banner (short timeout)
+  if timeout 3 socat - TCP:${SOCK_HOST}:${SOCK_PORT},connect-timeout=3 2>/dev/null | head -n 1 | grep -i -E "router|mikrotik|login" >/dev/null 2>&1; then
+    log "Detected CHR banner (try $i)"
     break
-  else
-    log "Waiting for CHR serial socket (try $i/$RETRIES)..."
-    sleep $SLEEP
   fi
+  # quick connectivity test
+  if timeout 2 bash -c "</dev/tcp/${SOCK_HOST}/${SOCK_PORT}" 2>/dev/null; then
+    log "Socket open but banner not yet. try $i/$RETRIES"
+  else
+    log "Socket not open yet (try $i/$RETRIES)"
+  fi
+  sleep $SLEEP
 done
 
-log "Injecting $RSC into CHR"
+# final check: ensure socket open
+if ! timeout 3 bash -c "</dev/tcp/${SOCK_HOST}/${SOCK_PORT}" 2>/dev/null; then
+  log "ERROR: socket ${SOCK_HOST}:${SOCK_PORT} not open after retries; aborting" | tee -a "$LOG"
+  exit 1
+fi
+
+log "Injecting $RSC via socat (slowly)"
 while IFS= read -r line; do
-  echo "$line" | socat - TCP:$SOCK,connect-timeout=5 || true
-  sleep 0.15
+  printf "%s\n" "$line" | socat - TCP:${SOCK_HOST}:${SOCK_PORT},connect-timeout=5 || true
+  sleep 0.12
 done < "$RSC"
-log "Injection complete"
+
+log "Injection finished at $(date)" | tee -a "$LOG"
