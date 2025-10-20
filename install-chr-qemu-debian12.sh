@@ -1,8 +1,9 @@
 #!/bin/bash
-# Final version: install-chr-qemu-debian12.sh
-# Clean installer for MikroTik CHR on Debian 12 (QEMU Bridge NAT)
-# Local LAN: 10.0.0.0/28 | Bridge: 10.0.0.1 | CHR: 10.0.0.2
-
+# Final stable installer: install-chr-qemu-debian12.sh
+# - Bridge: 10.0.0.1/28 (host)
+# - CHR guest IP: 10.0.0.2/28
+# - Creates disk if missing, creates bridge/tap, systemd service, iptables rules
+# - Waits and uses force-inject.sh to inject init-config when CHR ready
 set -euo pipefail
 
 BRIDGE="bridge-nat"
@@ -10,94 +11,105 @@ TAP="tap0"
 BRIDGE_IP="10.0.0.1/28"
 CHR_IP="10.0.0.2/28"
 CHR_DIR="/root/chr"
-CHR_IMG="/root/chr/chr-7.20.1-legacy-bios.qcow2"
-CHR_DISK="/root/chr/chr-disk.qcow2"
-CHR_ZIP="/root/chr/chr-7.20.1-legacy-bios.qcow2.zip"
-SERVICE_FILE="/etc/systemd/system/chr.service"
-INJECT_SCRIPT="/root/chr/force-inject.sh"
-INIT_RSC="/root/chr/init-config.rsc"
+CHR_IMG="$CHR_DIR/chr-7.20.1-legacy-bios.qcow2"
+CHR_DISK="$CHR_DIR/chr-disk.qcow2"
+CHR_ZIP="$CHR_DIR/chr-7.20.1-legacy-bios.qcow2.zip"
 IMG_URL="https://github.com/elseif/MikroTikPatch/releases/download/7.20.1/chr-7.20.1-legacy-bios.qcow2.zip"
+SERVICE_FILE="/etc/systemd/system/chr.service"
+INJECT_SCRIPT="$CHR_DIR/force-inject.sh"
+INIT_RSC="$CHR_DIR/init-config.rsc"
 
-log(){ echo -e "\\033[1;36m[CHR-INSTALL]\\033[0m $*"; }
+log(){ echo -e \"[CHR-INSTALL] $*\"; }
 
-log "Installing dependencies"
+log \"Install deps (qemu, bridge-utils, socat, unzip)\"
 apt update -y
-apt install -y qemu-system-x86 bridge-utils wget unzip socat iproute2 iptables
+apt install -y qemu-system-x86 bridge-utils wget unzip socat iproute2 iptables || true
 
-log "Stopping any existing CHR instance"
+log \"Create working dir $CHR_DIR\"
+mkdir -p "$CHR_DIR"
+
+log \"Stop existing chr service and qemu\"
 systemctl stop chr 2>/dev/null || true
 pkill -f qemu-system-x86_64 2>/dev/null || true
 sleep 1
 
-log "Cleaning old files"
-rm -rf "$CHR_DIR" /root/chr-* "$SERVICE_FILE"
-mkdir -p "$CHR_DIR"
+log \"Create bridge $BRIDGE and assign IP $BRIDGE_IP\"
+ip link add name "$BRIDGE" type bridge 2>/dev/null || true
+ip addr flush dev "$BRIDGE" || true
+ip addr add "$BRIDGE_IP" dev "$BRIDGE" || true
+ip link set dev "$BRIDGE" up || true
 
-log "Creating bridge and tap"
-ip link del $BRIDGE 2>/dev/null || true
-ip link del $TAP 2>/dev/null || true
-ip link add name $BRIDGE type bridge
-ip addr add $BRIDGE_IP dev $BRIDGE
-ip link set $BRIDGE up
-ip tuntap add dev $TAP mode tap
-ip link set $TAP master $BRIDGE
-ip link set $TAP up
+log \"Create tap $TAP and attach to bridge\"
+ip tuntap add dev "$TAP" mode tap 2>/dev/null || true
+ip link set "$TAP" master "$BRIDGE" 2>/dev/null || true
+ip link set dev "$TAP" up 2>/dev/null || true
+ip link set dev "$BRIDGE" promisc on 2>/dev/null || true
+ip link set dev "$TAP" promisc on 2>/dev/null || true
 
-log "Downloading CHR image"
-cd "$CHR_DIR"
-wget -O "$CHR_ZIP" "$IMG_URL"
-unzip -o "$CHR_ZIP"
-mv chr-*.qcow2 "$CHR_IMG"
-
-log "Creating persistent CHR disk"
-qemu-img create -f qcow2 "$CHR_DISK" 2G
-
-log "Creating init RouterOS script"
-cat > "$INIT_RSC" <<'EOF'
-# Initial RouterOS configuration
-/ip address add address=10.0.0.2/28 interface=ether1
-/ip service enable winbox
-/ip service set www disabled=yes
-/ip firewall filter add chain=input connection-state=established,related action=accept comment="allow established"
-/ip firewall filter add chain=input src-address=10.0.0.0/28 action=accept comment="allow LAN"
-/ip firewall filter add chain=input protocol=tcp dst-port=8291,22,80,443 action=accept comment="allow mgmt"
-/ip firewall filter add chain=input action=drop comment="drop all other"
-EOF
-
-log "Creating force-inject.sh"
-cat > "$INJECT_SCRIPT" <<'EOF'
-#!/bin/bash
-# force-inject.sh — safely inject init config into CHR
-set -euo pipefail
-SOCK=127.0.0.1:5000
-RSC="/root/chr/init-config.rsc"
-RETRIES=15
-SLEEP=3
-log(){ echo -e "\\033[1;33m[INJECT]\\033[0m $*"; }
-
-for i in $(seq 1 $RETRIES); do
-  if timeout 2 bash -c "</dev/tcp/127.0.0.1/5000" 2>/dev/null; then
-    log "Socket ready (try $i)"
-    break
-  else
-    log "Waiting for CHR serial socket (try $i/$RETRIES)..."
-    sleep $SLEEP
+log \"Download CHR image if missing\"
+if [ ! -f \"$CHR_IMG\" ]; then
+  cd \"$CHR_DIR\"
+  wget -O \"$CHR_ZIP\" \"$IMG_URL\" || true
+  if [ -f \"$CHR_ZIP\" ]; then
+    unzip -o \"$CHR_ZIP\" -d \"$CHR_DIR\" || true
+    found=$(ls \"$CHR_DIR\"/*.qcow2 2>/dev/null | head -n1 || true)
+    if [ -n \"$found\" ]; then
+      mv -f \"$found\" \"$CHR_IMG\" || true
+    fi
   fi
-done
+fi
 
-log "Injecting $RSC into CHR"
-while IFS= read -r line; do
-  echo "$line" | socat - TCP:$SOCK,connect-timeout=5 || true
-  sleep 0.15
-done < "$RSC"
-log "Injection complete"
+if [ ! -f \"$CHR_IMG\" ]; then
+  log \"ERROR: CHR image not found at $CHR_IMG. Place qcow2 and re-run.\"
+  exit 1
+fi
+
+log \"Create persistent disk if missing\"
+if [ ! -f \"$CHR_DISK\" ]; then
+  qemu-img create -f qcow2 \"$CHR_DISK\" 2G
+fi
+
+log \"Create init-config and injector (if missing)\"
+# copy provided init and inject scripts if they exist in current dir (repo)
+if [ -f ./init-config.rsc ]; then cp ./init-config.rsc \"$INIT_RSC\"; fi
+if [ -f ./force-inject.sh ]; then cp ./force-inject.sh \"$INJECT_SCRIPT\"; fi
+
+# If injector or init-config not present, create minimal ones
+if [ ! -f \"$INIT_RSC\" ]; then
+  cat > \"$INIT_RSC\" <<'EOF'
+/ip address add address=10.0.0.2/28 interface=ether1
+/ip route add gateway=10.0.0.1
+/ip dns set servers=8.8.8.8
+/ip service enable winbox
+/ip service enable api
+/ip service enable ssh
+/ip firewall nat add chain=srcnat out-interface=ether1 action=masquerade
 EOF
-chmod +x "$INJECT_SCRIPT"
+fi
 
-log "Creating systemd service"
-cat > "$SERVICE_FILE" <<EOF
+if [ ! -f \"$INJECT_SCRIPT\" ]; then
+  cat > \"$INJECT_SCRIPT\" <<'EOF'
+#!/bin/bash
+# minimal injector placeholder (should be replaced by provided force-inject.sh)
+for i in {1..10}; do
+  if timeout 2 bash -c "</dev/tcp/127.0.0.1/5000" 2>/dev/null; then
+    break
+  fi
+  sleep 3
+done
+# try simple injection via socat
+while IFS= read -r l; do
+  printf "%s\n" "$l" | socat - TCP:127.0.0.1:5000,connect-timeout=5 || true
+  sleep 0.1
+done < "$INIT_RSC"
+EOF
+  chmod +x \"$INJECT_SCRIPT\"
+fi
+
+log \"Create systemd service $SERVICE_FILE\"
+cat > \"$SERVICE_FILE\" <<EOF
 [Unit]
-Description=MikroTik CHR (QEMU Bridge NAT)
+Description=MikroTik CHR (QEMU Bridge-NAT)
 After=network.target
 
 [Service]
@@ -105,8 +117,9 @@ Type=simple
 ExecStartPre=/bin/bash -c 'ip tuntap add dev $TAP mode tap 2>/dev/null || true'
 ExecStartPre=/bin/bash -c 'ip link set $TAP master $BRIDGE 2>/dev/null || true'
 ExecStartPre=/bin/bash -c 'ip link set $TAP up 2>/dev/null || true'
+ExecStartPre=/bin/bash -c 'ip link set $BRIDGE up 2>/dev/null || true'
 ExecStart=/usr/bin/qemu-system-x86_64 -m 256M -drive file=$CHR_IMG,if=virtio,media=disk,format=qcow2 -drive file=$CHR_DISK,if=virtio,media=disk,format=qcow2 -netdev tap,id=net0,ifname=$TAP,script=no,downscript=no -device virtio-net-pci,netdev=net0 -nographic -serial telnet:127.0.0.1:5000,server,nowait
-Restart=always
+Restart=on-failure
 RestartSec=3
 
 [Install]
@@ -114,17 +127,39 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable chr --now
+systemctl enable chr --now || true
 
-log "Configuring NAT rules"
-sysctl -w net.ipv4.ip_forward=1
-iptables -t nat -A PREROUTING -p tcp --dport 8291 -j DNAT --to-destination 10.0.0.2:8291
+log \"Ensure ip_forward and iptables NAT/forward rules\"
+sysctl -w net.ipv4.ip_forward=1 || true
+
+# Clear any existing CHR-specific rules first (safe cleanup)
+iptables -t nat -D PREROUTING -i eth0 -p tcp --dport 8291 -j DNAT --to-destination $CHR_IP:8291 2>/dev/null || true
+iptables -t nat -D POSTROUTING -s 10.0.0.0/28 -o eth0 -j MASQUERADE 2>/dev/null || true
+iptables -D FORWARD -i eth0 -o $BRIDGE -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i $BRIDGE -o eth0 -j ACCEPT 2>/dev/null || true
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 8291 -j DNAT --to-destination $CHR_IP:8291
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 22291 -j DNAT --to-destination $CHR_IP:8291
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 22 -j DNAT --to-destination $CHR_IP:22
 iptables -t nat -A POSTROUTING -s 10.0.0.0/28 -o eth0 -j MASQUERADE
+iptables -I FORWARD -i eth0 -o $BRIDGE -p tcp --dport 8291 -j ACCEPT
 iptables -I FORWARD -i $BRIDGE -o eth0 -j ACCEPT
-iptables -I FORWARD -i eth0 -o $BRIDGE -j ACCEPT
 
-log "Running injector after delay (wait for CHR boot)"
-sleep 25
-"$INJECT_SCRIPT" || true
+log \"Wait for CHR to start and then inject config (this may take up to 120s on slow VPS)\"
+# give QEMU some time to start
+sleep 6
 
-log "✅ Installation done. Check with: systemctl status chr"
+# Run injector (it has its own retries)
+chmod +x \"$INJECT_SCRIPT\"
+\"$INJECT_SCRIPT\" || true
+
+# try again with a longer wait if still unreachable
+for try in 1 2 3; do
+  sleep $((try*20))
+  if timeout 2 bash -c "</dev/tcp/10.0.0.2/8291" 2>/dev/null; then
+    log \"CHR Winbox reachable at 10.0.0.2:8291 (after try $try)\"
+    break
+  fi
+  log \"CHR not reachable yet (try $try).\"\ndone
+
+log \"Done. Check: systemctl status chr and bash $CHR_DIR/status.sh (if provided).\"\n
