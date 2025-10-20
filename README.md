@@ -3,10 +3,6 @@
 **Repository contains:**  
 - `install-chr-qemu-debian12.sh` — Full auto installer (QEMU + bridge NAT + port-forwarding + first-boot injector).  
 - `force-inject.sh` — Robust injector to push MikroTik commands to CHR via QEMU serial (jika diperlukan).
-
-Versi: **v2.2**  
-Penulis: **EKO SULISTYAWAN** (dengan bantuan ChatGPT GPT-5)
-
 ---
 
 ## Deskripsi singkat
