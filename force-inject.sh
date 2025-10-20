@@ -1,33 +1,25 @@
 #!/bin/bash
-# force-inject.sh: wait for QEMU serial socket and inject initial RouterOS config
-# Expects init-config.rsc to be in the same directory (/root/chr/init-config.rsc)
+# force-inject.sh — safely inject init config into CHR
 set -euo pipefail
-HOST_SOCKET=127.0.0.1:5000
-RSC_FILE="/root/chr/init-config.rsc"
-RETRIES=18
+SOCK=127.0.0.1:5000
+RSC="/root/chr/init-config.rsc"
+RETRIES=15
 SLEEP=3
+log(){ echo -e "\033[1;33m[INJECT]\033[0m $*"; }
 
-log(){ echo "[inject] $*"; }
-
-log "Waiting for CHR serial socket $HOST_SOCKET"
 for i in $(seq 1 $RETRIES); do
   if timeout 2 bash -c "</dev/tcp/127.0.0.1/5000" 2>/dev/null; then
-    log "CHR serial socket is reachable (try $i)"
+    log "Socket ready (try $i)"
     break
   else
-    log "CHR serial not ready (try $i/$RETRIES). Sleeping $SLEEP s..."
+    log "Waiting for CHR serial socket (try $i/$RETRIES)..."
     sleep $SLEEP
-  fi
-  if [ $i -eq $RETRIES ]; then
-    log "WARNING: CHR serial socket did not become available after $((RETRIES*SLEEP))s"
   fi
 done
 
-log "Injecting init script into CHR via socat"
-# send the RSC lines with small pauses to avoid overwhelming slow VM
+log "Injecting $RSC into CHR"
 while IFS= read -r line; do
-  printf "%s\n" "$line" | socat - TCP:${HOST_SOCKET},connect-timeout=5 || true
-  sleep 0.12
-done < "$RSC_FILE"
-
-log "Injection finished"
+  echo "$line" | socat - TCP:$SOCK,connect-timeout=5 || true
+  sleep 0.15
+done < "$RSC"
+log "Injection complete"
