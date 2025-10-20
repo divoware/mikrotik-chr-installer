@@ -5,7 +5,6 @@
 # - Auto IP assign 10.92.68.2/28, enable services, persistent
 # - Port forwarding: 22,80,443,8291,8728,8729 -> CHR
 # - Stable systemd unit
-# Author: EKO SULISTYAWAN (with ChatGPT GPT-5)
 # ==========================================================================
 set -euo pipefail
 
